@@ -1,0 +1,95 @@
+# Reusable workflow that builds and publishes the release artifacts for a tag:
+# the default deployment manifest, the multi-arch Docker image, and the
+# self-hosted Helm charts sync PR. Called by publish-release.yml (on release PR
+# merge) and release.yml (manual tag-push fallback).
+name: reusable release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build artifacts for (e.g. v0.41.0)
+        required: true
+        type: string
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      AIVEN_CI_PAT__VALID_WHILE_MURAD_IS_EMPLOYED:
+        required: true
+
+jobs:
+  build_default_release_manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - shell: bash
+        run: |
+          echo "resources: [manager.yaml]
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          images:
+          - name: controller
+            newName: aivenoy/aiven-operator
+            newTag: ${{ inputs.tag }}
+          " > config/manager/kustomization.yaml
+      - uses: karancode/kustomize-github-action@v1.3.2
+        with:
+          kustomize_version: 4.5.7
+          kustomize_build_dir: config/default
+          kustomize_output_file: deployment.yaml
+          # TODO: remove token once https://github.com/karancode/kustomize-github-action/issues/46 is resolved
+          token: ${{ github.token }}
+        env:
+          GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: deployment.yaml
+          asset_name: deployment.yaml
+          tag: ${{ inputs.tag }}
+
+  build_and_push_docker_image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: docker_build
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: aivenoy/aiven-operator:${{ inputs.tag }}
+          build-args: |
+            VERSION=${{ inputs.tag }}
+
+  sync-charts:
+    needs:
+      - build_default_release_manifest
+      - build_and_push_docker_image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: BetaHuhn/repo-file-sync-action@v1
+        with:
+          GH_PAT: ${{ secrets.AIVEN_CI_PAT__VALID_WHILE_MURAD_IS_EMPLOYED }}
+          COMMIT_PREFIX: "chore:"

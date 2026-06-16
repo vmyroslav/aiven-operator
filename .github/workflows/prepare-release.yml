@@ -1,0 +1,212 @@
+# Step 1 of the release process. Manually dispatched with a target version.
+# Bumps the chart/changelog versions via `make charts`, opens a labeled release
+# PR, and runs lint + unit + (optional) e2e against the PR head. Test results
+# run inside this dispatch (not as PR-triggered checks), so report_all_statuses
+# posts commit statuses back to the PR head SHA to satisfy branch protection
+# without needing a personal access token. After a human approves and merges the
+# PR, publish-release.yml takes over.
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (e.g. 0.41.0)"
+        required: true
+        type: string
+      run_e2e_tests:
+        description: "Run the e2e acceptance tests? (Uncheck to skip, only if you are sure)"
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  create_release_pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_head_sha: ${{ steps.create-pr.outputs.pull-request-head-sha }}
+      pr_created: ${{ steps.create-pr.outputs.pull-request-number != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify release version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' must be in the form X.Y.Z without a leading v"
+            exit 1
+          fi
+          if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Update charts and changelog
+        run: make version=v${{ inputs.version }} charts
+
+      - name: Extract changelog content for PR
+        id: changelog
+        run: |
+          NOTES=$(awk '/^## v${{ inputs.version }} /{flag=1; next} /^## /{flag=0} flag' CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            echo "::error::No changelog entry found for v${{ inputs.version }} — expected a '## v${{ inputs.version }} ' header in CHANGELOG.md"
+            exit 1
+          fi
+          {
+            echo "content<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add -A
+          git commit -m "chore(release): v${{ inputs.version }}"
+
+      - name: Create Pull Request
+        id: create-pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          author: GitHub <noreply@github.com>
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: release-v${{ inputs.version }}
+          base: main
+          title: "chore(release): v${{ inputs.version }}"
+          body: |
+            ## Release v${{ inputs.version }}
+
+            ### Changelog
+            ${{ steps.changelog.outputs.content }}
+
+            ---
+
+            *This PR was created automatically by the Prepare Release workflow.*
+          labels: |
+            release
+          draft: false
+
+  run_lint_checks:
+    needs: create_release_pr
+    if: needs.create_release_pr.outputs.pr_created == 'true'
+    uses: ./.github/workflows/lint.yml
+    with:
+      ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
+
+  run_unit_tests:
+    needs: create_release_pr
+    if: needs.create_release_pr.outputs.pr_created == 'true'
+    uses: ./.github/workflows/unit-tests.yml
+    with:
+      ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
+
+  run_e2e_tests:
+    needs: create_release_pr
+    if: needs.create_release_pr.outputs.pr_created == 'true' && inputs.run_e2e_tests
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
+    secrets:
+      AIVEN_TOKEN: ${{ secrets.AIVEN_TOKEN }}
+      AIVEN_ACCOUNT_ID: ${{ secrets.AIVEN_ACCOUNT_ID }}
+      AIVEN_PROJECT_NAME_PREFIX: ${{ secrets.AIVEN_PROJECT_NAME_PREFIX }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+
+  report_all_statuses:
+    needs:
+      - create_release_pr
+      - run_lint_checks
+      - run_unit_tests
+      - run_e2e_tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always() && needs.create_release_pr.outputs.pr_created == 'true'
+    permissions:
+      statuses: write
+    steps:
+      - name: Report status of all checks to the PR head
+        uses: actions/github-script@v9
+        env:
+          HEAD_SHA: ${{ needs.create_release_pr.outputs.pr_head_sha }}
+        with:
+          script: |
+            const head_sha = process.env.HEAD_SHA;
+            if (!head_sha) {
+              console.log('No PR head SHA. Skipping status reporting.');
+              return;
+            }
+
+            async function postStatus(checkName, result) {
+              let state = 'failure';
+              if (result === 'success') {
+                state = 'success';
+              } else if (result === 'skipped') {
+                state = 'success';
+              }
+              console.log(`Reporting ${checkName}: ${state}`);
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: head_sha,
+                state: state,
+                context: checkName,
+                description: `${checkName}: ${result}`,
+                target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            }
+
+            await postStatus('lint', '${{ needs.run_lint_checks.result }}');
+            await postStatus('unit-tests', '${{ needs.run_unit_tests.result }}');
+            await postStatus('tests', '${{ needs.run_e2e_tests.result }}');
+
+  notify-slack-success:
+    needs:
+      - create_release_pr
+      - run_lint_checks
+      - run_unit_tests
+      - run_e2e_tests
+    if: >
+      needs.create_release_pr.outputs.pr_created == 'true' &&
+      needs.run_lint_checks.result == 'success' &&
+      needs.run_unit_tests.result == 'success' &&
+      (needs.run_e2e_tests.result == 'success' || needs.run_e2e_tests.result == 'skipped')
+    uses: ./.github/workflows/slack-notify.yml
+    with:
+      status: success
+      workflow_name: Prepare Release
+      custom_message: Release v${{ inputs.version }} preparation completed successfully
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+
+  notify-slack-failure:
+    needs:
+      - create_release_pr
+      - run_lint_checks
+      - run_unit_tests
+      - run_e2e_tests
+    if: always() && failure() && needs.create_release_pr.outputs.pr_created == 'true'
+    uses: ./.github/workflows/slack-notify.yml
+    with:
+      status: failure
+      workflow_name: Prepare Release
+      custom_message: Release v${{ inputs.version }} preparation failed
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}

@@ -4,12 +4,21 @@ on:
   pull_request:
     branches:
       - main
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref (branch/tag/SHA) to checkout. Defaults to the default branch.
+        required: false
+        type: string
+        default: ""
 
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod

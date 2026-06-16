@@ -1,0 +1,99 @@
+# Step 2 of the release process. Triggered automatically when a release PR
+# (branch release-v*, label `release`) is merged into main. Tags the merge
+# commit, creates a DRAFT GitHub release pre-filled with the changelog notes
+# (a human publishes it after polishing), then builds and publishes the
+# artifacts via the reusable workflow. Doing the tag + artifacts in one run
+# avoids relying on a tag-push event to trigger another workflow, so no PAT is
+# needed.
+name: Publish Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+concurrency:
+  group: publish-release-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag-and-draft-release:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release-v') &&
+      contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.get_version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from branch name
+        id: get_version
+        run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+          VERSION="${BRANCH_NAME#release-v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not extract a valid version from branch '$BRANCH_NAME'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          NOTES_FILE="ci-release-notes.md"
+          awk '/^## v${{ steps.get_version.outputs.version }} /{flag=1; next} /^## /{flag=0} flag' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "::error::Changelog notes for v${{ steps.get_version.outputs.version }} are empty"
+            exit 1
+          fi
+          echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git tag ${{ steps.get_version.outputs.tag }}
+          git push origin ${{ steps.get_version.outputs.tag }}
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.get_version.outputs.tag }}" \
+            --draft \
+            --title "${{ steps.get_version.outputs.tag }}" \
+            --notes-file "${{ steps.notes.outputs.path }}"
+
+  artifacts:
+    needs: tag-and-draft-release
+    uses: ./.github/workflows/reusable-release-artifacts.yml
+    with:
+      tag: ${{ needs.tag-and-draft-release.outputs.tag }}
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      AIVEN_CI_PAT__VALID_WHILE_MURAD_IS_EMPLOYED: ${{ secrets.AIVEN_CI_PAT__VALID_WHILE_MURAD_IS_EMPLOYED }}
+
+  notify-slack-failure:
+    needs:
+      - tag-and-draft-release
+      - artifacts
+    if: failure()
+    uses: ./.github/workflows/slack-notify.yml
+    with:
+      status: failure
+      workflow_name: Publish Release
+      custom_message: Release publishing failed
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
