@@ -108,7 +108,7 @@ jobs:
     needs:
       - tag-and-draft-release
       - artifacts
-    if: failure()
+    if: github.repository == 'aiven/aiven-operator' # REHEARSAL: skipped in forks
     uses: ./.github/workflows/slack-notify.yml
     with:
       status: failure

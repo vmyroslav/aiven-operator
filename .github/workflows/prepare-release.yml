@@ -239,11 +239,7 @@ jobs:
       - run_lint_checks
       - run_unit_tests
       - run_e2e_tests
-    if: >
-      needs.create_release_pr.outputs.pr_created == 'true' &&
-      needs.run_lint_checks.result == 'success' &&
-      needs.run_unit_tests.result == 'success' &&
-      (needs.run_e2e_tests.result == 'success' || needs.run_e2e_tests.result == 'skipped')
+    if: github.repository == 'aiven/aiven-operator' # REHEARSAL: skipped in forks
     uses: ./.github/workflows/slack-notify.yml
     with:
       status: success
@@ -259,7 +255,7 @@ jobs:
       - run_lint_checks
       - run_unit_tests
       - run_e2e_tests
-    if: (failure() || cancelled()) && needs.create_release_pr.outputs.pr_created == 'true'
+    if: github.repository == 'aiven/aiven-operator' # REHEARSAL: skipped in forks
     uses: ./.github/workflows/slack-notify.yml
     with:
       status: failure

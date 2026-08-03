@@ -2,6 +2,8 @@
 
 ## [MAJOR.MINOR.PATCH] - YYYY-MM-DD
 
+- Rehearsal entry: exercise the automated release workflow end to end
+
 ## v0.43.0 - 2026-07-24
 
 - Add `ServiceUser` field `username`, type `string`: Username of the service user on Aiven.
