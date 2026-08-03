@@ -14,6 +14,8 @@ on:
     branches:
       - main
 
+permissions: {}
+
 concurrency:
   group: publish-release-${{ github.event.pull_request.head.ref }}
   cancel-in-progress: false
@@ -35,10 +37,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Git allows shell metacharacters in ref names, so the branch name reaches
+      # the shell through the environment rather than `${{ }}` interpolation.
+      # Interpolated expressions are substituted into the script before it runs,
+      # which would execute the payload ahead of the version check below.
       - name: Extract version from branch name
         id: get_version
+        env:
+          BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
         run: |
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
           VERSION="${BRANCH_NAME#release-v}"
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Could not extract a valid version from branch '$BRANCH_NAME'"
@@ -49,33 +56,46 @@ jobs:
 
       - name: Generate release notes
         id: notes
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
         run: |
           NOTES_FILE="ci-release-notes.md"
-          awk '/^## v${{ steps.get_version.outputs.version }} /{flag=1; next} /^## /{flag=0} flag' CHANGELOG.md > "$NOTES_FILE"
+          # Dots are regex wildcards to awk, so escape them before matching.
+          ESCAPED="${VERSION//./\\.}"
+          awk -v re="^## v${ESCAPED} " '$0 ~ re {flag=1; next} /^## /{flag=0} flag' CHANGELOG.md > "$NOTES_FILE"
           if [ ! -s "$NOTES_FILE" ]; then
-            echo "::error::Changelog notes for v${{ steps.get_version.outputs.version }} are empty"
+            echo "::error::Changelog notes for v$VERSION are empty"
             exit 1
           fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        env:
+          TAG: ${{ steps.get_version.outputs.tag }}
         run: |
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
-          git tag ${{ steps.get_version.outputs.tag }}
-          git push origin ${{ steps.get_version.outputs.tag }}
+          git tag "$TAG"
+          git push origin "$TAG"
 
       - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+          NOTES_PATH: ${{ steps.notes.outputs.path }}
         run: |
-          gh release create "${{ steps.get_version.outputs.tag }}" \
+          gh release create "$TAG" \
             --draft \
-            --title "${{ steps.get_version.outputs.tag }}" \
-            --notes-file "${{ steps.notes.outputs.path }}"
+            --title "$TAG" \
+            --notes-file "$NOTES_PATH"
 
   artifacts:
     needs: tag-and-draft-release
+    # Granted at the caller because the workflow-level `permissions: {}` above
+    # caps what a called workflow can request: the manifest job needs
+    # contents:write to attach deployment.yaml to the release.
+    permissions:
+      contents: write
     uses: ./.github/workflows/reusable-release-artifacts.yml
     with:
       tag: ${{ needs.tag-and-draft-release.outputs.tag }}

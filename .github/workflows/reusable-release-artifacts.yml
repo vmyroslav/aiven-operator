@@ -20,7 +20,24 @@ on:
         required: true
 
 jobs:
+  # release.yml passes whatever tag was pushed, and git permits shell
+  # metacharacters in ref names, so the tag is validated once here before any
+  # job interpolates or shells out with it.
+  validate_tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to build artifacts for malformed tag '$TAG' (expected vX.Y.Z)"
+            exit 1
+          fi
+
   build_default_release_manifest:
+    needs: validate_tag
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -31,6 +48,8 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
       - shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           echo "resources: [manager.yaml]
           apiVersion: kustomize.config.k8s.io/v1beta1
@@ -38,9 +57,9 @@ jobs:
           images:
           - name: controller
             newName: aivenoy/aiven-operator
-            newTag: ${{ inputs.tag }}
+            newTag: $TAG
           " > config/manager/kustomization.yaml
-      - uses: karancode/kustomize-github-action@v1.3.2
+      - uses: karancode/kustomize-github-action@883a86ec3535e4e7d0fe6450a85f8325c97d2a7b # v1.3.2
         with:
           kustomize_version: 4.5.7
           kustomize_build_dir: config/default
@@ -49,7 +68,7 @@ jobs:
           token: ${{ github.token }}
         env:
           GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: svenstaro/upload-release-action@v2
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: deployment.yaml
@@ -57,8 +76,12 @@ jobs:
           tag: ${{ inputs.tag }}
 
   build_and_push_docker_image:
+    needs: validate_tag
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Pushes to Docker Hub, needs nothing from the GitHub API beyond checkout.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,12 +107,17 @@ jobs:
       - build_and_push_docker_image
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Acts on the charts repo through GH_PAT, so the run's own token stays read-only.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
-      - uses: BetaHuhn/repo-file-sync-action@v1
+      # Pinned to a SHA: this step receives a long-lived PAT, so a moved tag on a
+      # third-party action would hand that credential to unreviewed code.
+      - uses: BetaHuhn/repo-file-sync-action@8b92be3375cf1d1b0cd579af488a9255572e4619 # v1
         with:
           GH_PAT: ${{ secrets.AIVEN_CI_PAT__VALID_WHILE_MURAD_IS_EMPLOYED }}
           COMMIT_PREFIX: "chore:"

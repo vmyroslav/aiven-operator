@@ -66,6 +66,9 @@ jobs:
       - uses: ./.github/actions/report-statuses
         with:
           sha: ${{ needs.generate.outputs.commit_hash }}
+          # lint-go is skipped on purpose when a PR carries the "skip workflows"
+          # label, so it is the only check allowed to be green while skipped.
+          success_on_skip: lint-go
           statuses: >-
             {
               "generate": "success",

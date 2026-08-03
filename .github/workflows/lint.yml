@@ -41,9 +41,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       result: ${{ job.status }}
+    # `inputs.ref != ''` is how a workflow_call invocation is detected: in a
+    # reusable workflow github.event_name is the *caller's* event, so it is never
+    # 'workflow_call' and testing for that silently skipped this job.
     if: >-
       github.event_name == 'push'
-      || github.event_name == 'workflow_call'
+      || inputs.ref != ''
       || (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip workflows'))
     steps:
       - uses: actions/checkout@v7

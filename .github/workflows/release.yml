@@ -1,7 +1,13 @@
 # Manual release fallback: builds and publishes artifacts when a developer
 # pushes a v* tag directly. The normal path is prepare-release.yml ->
-# publish-release.yml, which tags on release PR merge; the github-actions[bot]
-# guard below stops this workflow from double-running for that automated path.
+# publish-release.yml, which tags on release PR merge.
+#
+# Today this workflow does not fire for the automated path at all, because a tag
+# pushed with GITHUB_TOKEN does not trigger workflows. The guard below is what
+# keeps that true if the tag push ever moves to a PAT: it keys off whether a
+# GitHub release already exists for the tag, which publish-release.yml creates
+# before it builds artifacts. Checking the actor instead would not survive that
+# change, since a PAT pushes as its owner rather than github-actions[bot].
 name: release
 
 on:
@@ -9,9 +15,43 @@ on:
     tags:
       - v*
 
+permissions: {}
+
+concurrency:
+  group: release-artifacts-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists, so publish-release.yml owns this tag. Skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No release for $TAG yet, publishing artifacts for this manual tag push."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   artifacts:
-    if: github.actor != 'github-actions[bot]'
+    needs: guard
+    if: needs.guard.outputs.should_publish == 'true'
+    # Granted at the caller because the workflow-level `permissions: {}` above
+    # caps what a called workflow can request: the manifest job needs
+    # contents:write to attach deployment.yaml to the release.
+    permissions:
+      contents: write
     uses: ./.github/workflows/reusable-release-artifacts.yml
     with:
       tag: ${{ github.ref_name }}
