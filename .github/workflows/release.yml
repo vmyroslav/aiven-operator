@@ -36,7 +36,12 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+          # List releases rather than looking one up by tag: GET
+          # /releases/tags/{tag} returns 404 for DRAFT releases, and
+          # publish-release.yml creates a draft, so a by-tag probe reports "no
+          # release" for the very case this guard exists to catch and the tag
+          # gets published twice.
+          if gh api --paginate "repos/$REPO/releases" --jq '.[].tag_name' | grep -qxF "$TAG"; then
             echo "::notice::Release $TAG already exists, so publish-release.yml owns this tag. Skipping."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           else
