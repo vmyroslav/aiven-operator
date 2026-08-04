@@ -28,7 +28,10 @@ on:
         default: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.version }}
+  # github.event.inputs (not inputs) — workflow-level keys are evaluated before
+  # any job starts, where the inputs context is not reliably populated for
+  # workflow_dispatch. Using inputs.version here fails the run at startup.
+  group: ${{ github.workflow }}-${{ github.event.inputs.version }}
   # Never cancel: this job pushes a branch and opens a PR, so a cancelled run can
   # leave a half-prepared release behind with no statuses reported.
   cancel-in-progress: false
