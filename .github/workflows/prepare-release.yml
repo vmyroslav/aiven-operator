@@ -18,11 +18,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version without the v prefix (e.g. 0.41.0)"
+        description: Release version without the v prefix (e.g. 0.41.0)
         required: true
         type: string
       run_e2e_tests:
-        description: "Run the e2e acceptance tests? (Uncheck to skip, only if you are sure)"
+        description: Run the e2e acceptance tests? (Uncheck to skip, only if you are sure)
         required: true
         type: boolean
         default: true
