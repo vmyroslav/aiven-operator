@@ -1,6 +1,10 @@
 # Changelog
 
 
+## v99.6.0 - 2026-08-04
+
+- Rehearsal entry: verify the release asset lands on the draft release
+
 ## v99.5.0 - 2026-08-04
 
 - Rehearsal entry for docker gate test
