@@ -1,0 +1,155 @@
+# Step 1 of the release process. Manually dispatched with a target version.
+# Bumps the chart/changelog versions via `make charts`, opens a labeled release
+# PR, and runs lint + unit + (optional) e2e against the PR head. Test results
+# run inside this dispatch (not as PR-triggered checks), so report_all_statuses
+# posts commit statuses back to the PR head SHA to satisfy branch protection
+# without needing a personal access token. After a human approves and merges the
+# PR, publish-release.yml takes over.
+#
+# The PR is created with GITHUB_TOKEN, which by design does not trigger
+# pull_request events, so nothing runs under its own check name. That makes the
+# contexts posted by report_all_statuses the only thing branch protection sees:
+# they must match the required checks on main exactly. Keep them in sync with
+# `gh api repos/aiven/aiven-operator/branches/main/protection \
+#   --jq .required_status_checks.contexts`
+name: probe1
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (e.g. 0.41.0)"
+        required: true
+        type: string
+      run_e2e_tests:
+        description: "Run the e2e acceptance tests? (Uncheck to skip, only if you are sure)"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  create_release_pr:
+    runs-on: ubuntu-latest
+    # Generous because this job now runs the full `make generate` pipeline.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      pr_head_sha: ${{ steps.create-pr.outputs.pull-request-head-sha }}
+      pr_created: ${{ steps.create-pr.outputs.pull-request-number != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # A release must be cut from main, otherwise this would ship an arbitrary
+      # branch's code under a version bump that makes it look official.
+      - name: Verify dispatched from main
+        if: github.ref != 'refs/heads/main'
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          echo "::error::Prepare Release must be dispatched from main, got $DISPATCH_REF"
+          exit 1
+
+      # inputs.version reaches the shell through the environment, never through
+      # `${{ }}` interpolation: expressions are substituted into the script before
+      # it runs, so an interpolated value would execute ahead of these checks.
+      - name: Verify release version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$VERSION' must be in the form X.Y.Z without a leading v"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"
+            exit 1
+          fi
+
+      # Mirrors generate.yml so the release commit is generation-clean and the
+      # `generate` required check can be reported without a second commit.
+      # Runs before the version bump: `make generate` calls the charts generator
+      # without a version, which is a no-op for Chart.yaml and the changelog
+      # header (see generators/charts/main.go), while the step below stamps them.
+      - name: install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - run: curl https://get.trunk.io -fsSL | bash
+
+      - name: Generate files
+        run: make generate
+
+      - name: Update charts and changelog
+        env:
+          VERSION: ${{ inputs.version }}
+        run: make "version=v$VERSION" charts
+
+      - name: Extract changelog content for PR
+        id: changelog
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # Dots are regex wildcards, so escape them before matching.
+          ESCAPED="${VERSION//./\\.}"
+          if ! grep -qE "^## v${ESCAPED} " CHANGELOG.md; then
+            echo "::error::No '## v$VERSION ' header in CHANGELOG.md — did make charts run?"
+            exit 1
+          fi
+          NOTES=$(awk -v re="^## v${ESCAPED} " '$0 ~ re {flag=1; next} /^## /{flag=0} flag' CHANGELOG.md)
+          # An empty body means nothing accumulated under the placeholder, which
+          # is a release with no notes rather than a missing header.
+          if [ -z "$NOTES" ]; then
+            echo "::error::Changelog section for v$VERSION is empty. Add entries under the '## [MAJOR.MINOR.PATCH]' placeholder in CHANGELOG.md before releasing."
+            exit 1
+          fi
+          {
+            echo "content<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # No manual `git commit` here on purpose. The changes are left uncommitted
+      # so create-pull-request can commit them through the API with
+      # `sign-commits`, which main's required-signatures rule demands. A commit
+      # made by `git commit` on the runner would be unsigned and unmergeable.
+      - name: Create Pull Request
+        id: create-pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sign-commits: true
+          commit-message: "chore(release): v${{ inputs.version }}"
+          branch: release-v${{ inputs.version }}
+          base: main
+          title: "chore(release): v${{ inputs.version }}"
+          body: |
+            ## Release v${{ inputs.version }}
+
+            ### Changelog
+            ${{ steps.changelog.outputs.content }}
+
+            ---
+
+            *This PR was created automatically by the Prepare Release workflow.*
+          labels: |
+            release
+          draft: false
+
+      # create-pull-request is a no-op when there is nothing to commit, which
+      # would otherwise leave this workflow green without a release PR.
+      - name: Verify the release PR exists
+        env:
+          PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            echo '::error::No release PR was created — make generate/make charts produced no changes'
+            exit 1
+          fi
+          echo "Created release PR #$PR_NUMBER"
