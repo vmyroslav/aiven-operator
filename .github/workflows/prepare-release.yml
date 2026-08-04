@@ -28,10 +28,7 @@ on:
         default: true
 
 concurrency:
-  # github.event.inputs (not inputs) — workflow-level keys are evaluated before
-  # any job starts, where the inputs context is not reliably populated for
-  # workflow_dispatch. Using inputs.version here fails the run at startup.
-  group: ${{ github.workflow }}-${{ github.event.inputs.version }}
+  group: ${{ github.workflow }}-${{ inputs.version }}
   # Never cancel: this job pushes a branch and opens a PR, so a cancelled run can
   # leave a half-prepared release behind with no statuses reported.
   cancel-in-progress: false
@@ -163,9 +160,19 @@ jobs:
           fi
           echo "Created release PR #$PR_NUMBER"
 
+  # A called workflow only gets the permissions its caller job grants
+  # explicitly: the repository default does NOT propagate through `uses`. Any
+  # scope missing here arrives as `none` in the called workflow and fails the
+  # whole run at startup, before any job begins. So each block below is the
+  # union of what that workflow's own jobs declare.
   run_lint_checks:
     needs: create_release_pr
     if: needs.create_release_pr.outputs.pr_created == 'true'
+    permissions:
+      contents: read # checkout
+      checks: write # trunk annotations
+      actions: read # codeql
+      security-events: write # codeql upload
     uses: ./.github/workflows/lint.yml
     with:
       ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
@@ -173,6 +180,8 @@ jobs:
   run_unit_tests:
     needs: create_release_pr
     if: needs.create_release_pr.outputs.pr_created == 'true'
+    permissions:
+      contents: read
     uses: ./.github/workflows/unit-tests.yml
     with:
       ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
@@ -180,6 +189,9 @@ jobs:
   run_e2e_tests:
     needs: create_release_pr
     if: needs.create_release_pr.outputs.pr_created == 'true' && inputs.run_e2e_tests
+    permissions:
+      contents: read
+      pull-requests: write # tests.yml comments results on a PR when given one
     uses: ./.github/workflows/tests.yml
     with:
       ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
@@ -243,6 +255,8 @@ jobs:
       - run_unit_tests
       - run_e2e_tests
     if: github.repository == 'aiven/aiven-operator' # REHEARSAL: skipped in forks
+    permissions:
+      contents: read
     uses: ./.github/workflows/slack-notify.yml
     with:
       status: success
@@ -259,6 +273,8 @@ jobs:
       - run_unit_tests
       - run_e2e_tests
     if: github.repository == 'aiven/aiven-operator' # REHEARSAL: skipped in forks
+    permissions:
+      contents: read
     uses: ./.github/workflows/slack-notify.yml
     with:
       status: failure
