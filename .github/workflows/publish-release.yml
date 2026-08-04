@@ -22,8 +22,12 @@ concurrency:
 
 jobs:
   tag-and-draft-release:
+    # head.repo check: this triggers on any closed PR, forks included. A fork PR
+    # cannot reach here today (no secrets, read-only token, and the `release`
+    # label needs write access) but stating it removes the question entirely.
     if: >
       github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       startsWith(github.event.pull_request.head.ref, 'release-v') &&
       contains(github.event.pull_request.labels.*.name, 'release')
     runs-on: ubuntu-latest
@@ -33,8 +37,15 @@ jobs:
     outputs:
       tag: ${{ steps.get_version.outputs.tag }}
     steps:
+      # Pin the checkout to the commit the merge produced on main. The default
+      # would be github.ref, which for a pull_request event is the ephemeral
+      # refs/pull/N/merge test-merge ref rather than anything in main's history;
+      # `main` is wrong too, because it may have moved on since this PR merged.
+      # merge_commit_sha is neither, so the tag, the tag-collision check and the
+      # changelog read all operate on exactly the released commit.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
       # Git allows shell metacharacters in ref names, so the branch name reaches
@@ -47,7 +58,12 @@ jobs:
           BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
         run: |
           VERSION="${BRANCH_NAME#release-v}"
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # The pattern lives in a variable on purpose. Inline and unquoted in
+          # [[ =~ ]], the shell strips the backslashes before the regex sees
+          # them, so `\.` becomes `.` (any character) and 1x2x3 or "1 2 3" would
+          # pass. Quoting the assignment keeps them literal.
+          re='^[0-9]+\.[0-9]+\.[0-9]+$'
+          if ! [[ "$VERSION" =~ $re ]]; then
             echo "::error::Could not extract a valid version from branch '$BRANCH_NAME'"
             exit 1
           fi
@@ -69,6 +85,39 @@ jobs:
           fi
           echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
+      # A tag on a commit outside main's history would be silently wrong: the
+      # release, its notes and its image would all be built from something
+      # nobody can find on the branch. Cheap to assert, so assert it.
+      - name: Verify the commit being tagged is on main
+        run: |
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Refusing to tag $(git rev-parse HEAD): it is not an ancestor of main"
+            exit 1
+          fi
+          echo "Tagging $(git rev-parse --short HEAD), confirmed on main"
+
+      # The draft release is created BEFORE the tag is pushed, and the order
+      # matters. release.yml's duplicate-publish guard keys off a release
+      # existing for the tag, so if the tag were pushed first there would be a
+      # window where a tag-push event could see no release and publish the same
+      # tag a second time. Today no such event fires, because a tag pushed with
+      # GITHUB_TOKEN triggers nothing; this keeps it safe if that ever moves to
+      # a PAT. A draft release does not create the tag itself, which is why the
+      # push below is still needed: the artifact jobs check the tag out.
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.get_version.outputs.tag }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          NOTES_PATH: ${{ steps.notes.outputs.path }}
+        run: |
+          gh release create "$TAG" \
+            --target "$SHA" \
+            --draft \
+            --title "$TAG" \
+            --notes-file "$NOTES_PATH"
+
       - name: Create and push tag
         env:
           TAG: ${{ steps.get_version.outputs.tag }}
@@ -77,17 +126,6 @@ jobs:
           git config user.email "action@github.com"
           git tag "$TAG"
           git push origin "$TAG"
-
-      - name: Create draft GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.get_version.outputs.tag }}
-          NOTES_PATH: ${{ steps.notes.outputs.path }}
-        run: |
-          gh release create "$TAG" \
-            --draft \
-            --title "$TAG" \
-            --notes-file "$NOTES_PATH"
 
   artifacts:
     needs: tag-and-draft-release

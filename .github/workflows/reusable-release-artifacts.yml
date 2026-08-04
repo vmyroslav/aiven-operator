@@ -31,7 +31,11 @@ jobs:
       - env:
           TAG: ${{ inputs.tag }}
         run: |
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Pattern in a variable on purpose. Inline and unquoted in [[ =~ ]] the
+          # shell strips the backslashes, so `\.` becomes `.` (any character) and
+          # v1x2x3 would pass as a valid tag.
+          re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if ! [[ "$TAG" =~ $re ]]; then
             echo "::error::Refusing to build artifacts for malformed tag '$TAG' (expected vX.Y.Z)"
             exit 1
           fi

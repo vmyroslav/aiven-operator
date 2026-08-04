@@ -44,10 +44,12 @@ jobs:
     # `inputs.ref != ''` is how a workflow_call invocation is detected: in a
     # reusable workflow github.event_name is the *caller's* event, so it is never
     # 'workflow_call' and testing for that silently skipped this job.
-    if: >-
-      github.event_name == 'push'
-      || inputs.ref != ''
-      || (github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip workflows'))
+    # Honour the "skip workflows" label wherever a pull request is in play. On
+    # push and on workflow_call from a dispatch there is no PR context, so the
+    # label list is empty and this runs. Testing github.event_name for
+    # 'workflow_call' never worked: in a reusable workflow that context holds the
+    # CALLER's event, so lint-go was silently skipped on the release path.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'skip workflows') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,7 +113,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-      - uses: karancode/kustomize-github-action@master
+      - uses: karancode/kustomize-github-action@883a86ec3535e4e7d0fe6450a85f8325c97d2a7b # v1.3.2
         with:
           kustomize_version: 4.5.7
           kustomize_build_dir: config/default

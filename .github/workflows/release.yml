@@ -34,17 +34,25 @@ jobs:
       should_publish: ${{ steps.check.outputs.should_publish }}
     steps:
       - id: check
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
+          # The default shell is `bash -e`, with no pipefail, so piping straight
+          # into grep would report the pipeline's status as grep's: a failing
+          # `gh api` would be indistinguishable from "no release exists" and the
+          # guard would fail OPEN, publishing the tag a second time. Capture the
+          # listing first so an API error aborts instead.
+          set -euo pipefail
+          releases=$(gh api --paginate "repos/$REPO/releases" --jq '.[].tag_name')
+
           # List releases rather than looking one up by tag: GET
           # /releases/tags/{tag} returns 404 for DRAFT releases, and
           # publish-release.yml creates a draft, so a by-tag probe reports "no
-          # release" for the very case this guard exists to catch and the tag
-          # gets published twice.
-          if gh api --paginate "repos/$REPO/releases" --jq '.[].tag_name' | grep -qxF "$TAG"; then
+          # release" for the very case this guard exists to catch.
+          if grep -qxF "$TAG" <<<"$releases"; then
             echo "::notice::Release $TAG already exists, so publish-release.yml owns this tag. Skipping."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           else

@@ -34,6 +34,11 @@ jobs:
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           webhook-type: webhook-trigger
+          # retries: 0, because Slack accepts these posts even when the action
+          # decides the response was an error: each retry then delivers another
+          # copy of the same message. The action's default of 5 turns one
+          # notification into up to six, and burns ~5 minutes per run doing it.
+          retries: "0"
           payload: |
             {
               "blocks": [
@@ -81,6 +86,11 @@ jobs:
         with:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           webhook-type: webhook-trigger
+          # retries: 0, because Slack accepts these posts even when the action
+          # decides the response was an error: each retry then delivers another
+          # copy of the same message. The action's default of 5 turns one
+          # notification into up to six, and burns ~5 minutes per run doing it.
+          retries: "0"
           payload: |
             {
               "blocks": [

@@ -34,6 +34,58 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Cheap checks first: a typo in the version should not cost a multi-arch image
+  # build. Everything expensive needs this job, so nothing starts until the
+  # inputs are known good.
+  validate_inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # A release must be cut from main, otherwise this would ship an arbitrary
+      # branch's code under a version bump that makes it look official.
+      - name: Verify dispatched from main
+        if: github.ref != 'refs/heads/main'
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          echo "::error::Prepare Release must be dispatched from main, got $DISPATCH_REF"
+          exit 1
+
+      # inputs.version reaches the shell through the environment, never through
+      # `${{ }}` interpolation: expressions are substituted into the script before
+      # it runs, so an interpolated value would execute ahead of this check.
+      - name: Verify release version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          # The pattern lives in a variable on purpose. Inline and unquoted in
+          # [[ =~ ]], the shell strips the backslashes before the regex sees
+          # them, so `\.` becomes `.` (any character) and 1x2x3 or "1 2 3" would
+          # pass. Quoting the assignment keeps them literal.
+          re='^[0-9]+\.[0-9]+\.[0-9]+$'
+          if ! [[ "$VERSION" =~ $re ]]; then
+            echo "::error::Version '$VERSION' must be in the form X.Y.Z without a leading v"
+            exit 1
+          fi
+
+      # create-pull-request force-updates an existing branch, so re-dispatching a
+      # version already in flight would silently rewrite a release PR that may be
+      # under review.
+      - name: Verify no release is already in flight for this version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$REPO/branches/release-v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Branch release-v$VERSION already exists. Merge or close its release PR and delete the branch before dispatching again."
+            exit 1
+          fi
+
   # The image is built for real only in publish-release.yml, after the tag and
   # the GitHub release already exist, so a broken Dockerfile used to surface as a
   # half-published release needing a follow-up fix (be9b977d3 added
@@ -44,6 +96,7 @@ jobs:
   #
   # `push: false`, so this needs no registry credentials.
   verify_docker_build:
+    needs: validate_inputs
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -78,31 +131,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
-      # A release must be cut from main, otherwise this would ship an arbitrary
-      # branch's code under a version bump that makes it look official.
-      - name: Verify dispatched from main
-        if: github.ref != 'refs/heads/main'
-        env:
-          DISPATCH_REF: ${{ github.ref }}
-        run: |
-          echo "::error::Prepare Release must be dispatched from main, got $DISPATCH_REF"
-          exit 1
-
-      # inputs.version reaches the shell through the environment, never through
-      # `${{ }}` interpolation: expressions are substituted into the script before
-      # it runs, so an interpolated value would execute ahead of these checks.
-      - name: Verify release version
+      # Format and branch checks already ran in validate_inputs. This one needs
+      # the fetched tags, so it lives here.
+      - name: Verify the tag does not exist yet
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Version '$VERSION' must be in the form X.Y.Z without a leading v"
-            exit 1
-          fi
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
             echo "::error::Tag v$VERSION already exists"
             exit 1
@@ -144,10 +182,14 @@ jobs:
             echo "::error::Changelog section for v$VERSION is empty. Add entries under the '## [MAJOR.MINOR.PATCH]' placeholder in CHANGELOG.md before releasing."
             exit 1
           fi
+          # Random delimiter: the changelog is arbitrary text, and a line that
+          # happens to be the delimiter would truncate this output or let the
+          # changelog forge additional step outputs.
+          DELIM="EOF_$(openssl rand -hex 12)"
           {
-            echo "content<<EOF"
+            echo "content<<$DELIM"
             echo "$NOTES"
-            echo "EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
       # No manual `git commit` here on purpose. The changes are left uncommitted
@@ -191,9 +233,10 @@ jobs:
 
   # A called workflow only gets the permissions its caller job grants
   # explicitly: the repository default does NOT propagate through `uses`. Any
-  # scope missing here arrives as `none` in the called workflow and fails the
-  # whole run at startup, before any job begins. So each block below is the
-  # union of what that workflow's own jobs declare.
+  # scope a called job *declares* but the caller omits arrives as `none` and
+  # fails the whole run at startup, before any job begins. So each block below
+  # covers what that workflow actually needs — the union of the scopes its jobs
+  # declare, plus contents:read for the checkouts that declare nothing.
   run_lint_checks:
     needs: create_release_pr
     if: needs.create_release_pr.outputs.pr_created == 'true'
@@ -220,7 +263,6 @@ jobs:
     if: needs.create_release_pr.outputs.pr_created == 'true' && inputs.run_e2e_tests
     permissions:
       contents: read
-      pull-requests: write # tests.yml comments results on a PR when given one
     uses: ./.github/workflows/tests.yml
     with:
       ref: ${{ needs.create_release_pr.outputs.pr_head_sha }}
