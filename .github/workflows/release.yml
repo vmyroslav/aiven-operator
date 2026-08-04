@@ -26,7 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read
+      # contents: write, not read. GitHub only reveals DRAFT releases to tokens
+      # with push access, and the release this guard looks for is a draft, so a
+      # read-only token sees no release and lets the tag publish twice.
+      contents: write
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
     steps:
