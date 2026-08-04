@@ -68,12 +68,16 @@ jobs:
           token: ${{ github.token }}
         env:
           GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # draft: true is required, not cosmetic. This action rewrites the release's
+      # draft flag on every upload and defaults it to false, which published the
+      # draft that publish-release.yml deliberately leaves for a human to review.
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: deployment.yaml
           asset_name: deployment.yaml
           tag: ${{ inputs.tag }}
+          draft: true
 
   build_and_push_docker_image:
     needs: validate_tag
