@@ -2,6 +2,8 @@
 
 ## [MAJOR.MINOR.PATCH] - YYYY-MM-DD
 
+## v99.5.0 - 2026-08-04
+
 - Rehearsal entry for docker gate test
 
 ## v99.0.0 - 2026-08-04
